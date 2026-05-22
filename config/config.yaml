@@ -1,0 +1,46 @@
+trading:
+  instrument: "XAU_USD"
+  timeframes: ["M5", "M15", "H1"]
+  units: 10                         # 10 units XAU (paper trade)
+  loop_interval_minutes: 5
+  min_bars: 200                     # minimum candles required
+
+risk:
+  max_daily_drawdown: 0.03          # circuit breaker at -3%/day
+  max_portfolio_drawdown: 0.10      # hard stop at -10% total
+  min_llm_confidence: 0.60          # ignore LLM signal below this
+  position_change_threshold: 0.15   # minimum delta to trigger new order
+
+llm:
+  provider: "groq"
+  model: "llama-3.3-70b-versatile"
+  max_tokens: 200
+  temperature: 0.1
+  max_retries: 3
+
+rl:
+  algorithm: "PPO"
+  policy: "MlpPolicy"
+  population_size: 20
+  evolution_interval_days: 7
+  fitness_metric: "sharpe_ratio"
+  fitness_window_days: 7
+  observation_dim: 20
+  action_dim: 1
+
+backtest:
+  transaction_cost: 0.0002          # 2 pips spread equivalent
+  initial_cash: 100000
+
+oanda:
+  practice_url: "https://api-fxpractice.oanda.com"
+  stream_url: "https://stream-fxpractice.oanda.com"
+  environment: "practice"
+
+news:
+  max_headlines: 10
+  sources: ["gnews_rss", "newsapi"]
+
+logging:
+  db_path: "logs/trades.db"
+  level: "INFO"

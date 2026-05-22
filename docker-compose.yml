@@ -1,0 +1,22 @@
+version: "3.9"
+
+services:
+  trading-bot:
+    build: .
+    restart: always
+    env_file: config/.env
+    volumes:
+      - ./models:/app/models
+      - ./logs:/app/logs
+      - ./data:/app/data
+    command: python src/scheduler.py
+
+  dashboard:
+    build: .
+    restart: always
+    env_file: config/.env
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./logs:/app/logs
+    command: streamlit run src/dashboard/app.py --server.port 8501 --server.address 0.0.0.0

@@ -1,0 +1,16 @@
+config/.env
+*.pyc
+__pycache__/
+.env
+*.zip
+models/baseline_ppo.zip
+models/population/
+data/historical/
+logs/trades.db
+logs/*.log
+results/
+.venv/
+venv/
+*.egg-info/
+dist/
+.DS_Store
