@@ -1,6 +1,8 @@
 """
 Signal Router: fuses LLM signals + RL policy decision → final trade order.
-This is the brain of the 5-minute trading loop.
+
+Output is a CONTINUOUS `target_size` in [-1, 1] (negative = short, positive = long).
+Scheduler scales that by MAX_POSITION_OZ to compute actual oz to hold.
 """
 
 import logging
@@ -18,8 +20,7 @@ logger = logging.getLogger(__name__)
 _BEST_MODEL_PATH = str(PROJECT_ROOT / "models" / "best_policy")
 _BASELINE_MODEL_PATH = str(PROJECT_ROOT / "models" / "baseline_ppo")
 
-# Maximum position in oz used to normalize obs[13] to the [-1, 1] policy action scale.
-# Derived from scheduler scaling: max scaled_qty = QTY * 10 = 0.1 oz, max position = 0.1 * 10 = 1.0 oz.
+# Maximum gross position in oz. target_size=1.0 ⇒ +MAX_POSITION_OZ long.
 MAX_POSITION_OZ = 1.0
 
 _policy: Optional[PPO] = None
@@ -60,89 +61,75 @@ def decide(
     config: dict,
 ) -> dict:
     """
-    Fuse LLM signals + RL policy into a final position decision.
+    Fuse LLM signals + RL policy into a continuous position decision.
 
     Returns:
         {
-            "target_units": int,    # desired position in OANDA units
-            "action": str,          # "buy" | "sell" | "hold" | "close"
+            "target_size": float,     # desired position normalized to [-1, 1]
+            "action": str,            # "buy" | "sell" | "hold" | "close"
             "reason": str,
             "llm_signal": str,
             "rl_action": float,
             "confidence": float,
         }
     """
-    # Risk veto: abort immediately
+    current_units = float(current_position.get("units", 0.0))
+    current_size_norm = float(np.clip(current_units / MAX_POSITION_OZ, -1.0, 1.0))
+
+    # Risk veto → flatten
     if risk.get("veto", False):
-        return _decision(0, "hold", f"Risk veto: {risk.get('reason', '')}", tech_signal, 0.0, 0.0)
+        return _decision(0.0, current_size_norm, "close" if current_units != 0 else "hold",
+                         f"Risk veto: {risk.get('reason', '')}", tech_signal, 0.0, 0.0, config)
 
     llm_signal = tech_signal.get("signal", "hold")
     llm_confidence = tech_signal.get("confidence", 0.0)
     min_confidence = config.get("risk", {}).get("min_llm_confidence", 0.6)
 
     if llm_confidence < min_confidence:
-        return _decision(
-            current_position.get("units", 0), "hold",
-            f"LLM confidence {llm_confidence:.2f} < {min_confidence}",
-            tech_signal, 0.0, llm_confidence,
-        )
+        return _decision(current_size_norm, current_size_norm, "hold",
+                         f"LLM confidence {llm_confidence:.2f} < {min_confidence}",
+                         tech_signal, 0.0, llm_confidence, config)
 
-    # RL policy: build observation with LLM signals injected
     rl_action = _get_rl_action(df_m5, tech_signal, sentiment, current_position, account_summary)
 
-    # LLM-determined size (0.0–1.0) và direction (-1, 0, 1)
-    llm_numeric  = tech_signal.get("signal_numeric", 0.0)  # -1 / 0 / 1
-    llm_size     = tech_signal.get("size", llm_confidence) # LLM tự quyết khối lượng
+    llm_numeric  = tech_signal.get("signal_numeric", 0.0)
+    llm_size     = tech_signal.get("size", llm_confidence)
     sentiment_net = sentiment.get("net_sentiment", 0.0)
 
-    # Blend direction: 60% RL + 25% LLM + 15% sentiment
-    direction = 0.60 * rl_action + 0.25 * llm_numeric + 0.15 * sentiment_net * 0.5
+    # Direction blend: 60% RL + 25% LLM + 15% sentiment.
+    direction = 0.60 * rl_action + 0.25 * llm_numeric + 0.15 * (sentiment_net * 0.5)
     direction = float(np.clip(direction, -1.0, 1.0))
 
-    # Blend size: 50% LLM size + 50% |RL action| (RL cũng biết nên đặt bao nhiêu)
+    # Size blend: 50% LLM declared size + 50% |RL action|. RL drives variance now.
     blended_size = 0.50 * llm_size + 0.50 * abs(rl_action)
     blended_size = float(np.clip(blended_size, 0.0, 1.0))
 
-    # Apply risk manager's size reduction
-    size_pct = risk.get("adjusted_size_pct", 1.0)
-    if not risk.get("veto", False) and size_pct < 0.3:
+    # Risk-manager size adjustment (0.3 floor when not vetoed, to keep some skin in)
+    size_pct = float(risk.get("adjusted_size_pct", 1.0))
+    if size_pct < 0.3:
         size_pct = 0.3
     blended_size *= size_pct
 
-    # Final target: direction × size → [-1, 1] float
     MIN_SIGNAL = 0.02
     if direction > MIN_SIGNAL:
-        target_size_float = blended_size          # long
+        target_size = blended_size
     elif direction < -MIN_SIGNAL:
-        target_size_float = -blended_size         # short
+        target_size = -blended_size
     else:
-        target_size_float = 0.0                   # flat
-
-    # Convert to integer units (1 unit = 1 lệnh minimum)
-    target_units = 1 if target_size_float > MIN_SIGNAL else (-1 if target_size_float < -MIN_SIGNAL else 0)
+        target_size = 0.0
+    target_size = float(np.clip(target_size, -1.0, 1.0))
 
     logger.info(
-        "Router: rl=%.3f llm=%s(conf=%.2f size=%.2f) sentiment=%.2f "
-        "→ dir=%.3f size=%.2f → target=%+d",
+        "Router: rl=%+.3f llm=%s(conf=%.2f size=%.2f) sent=%+.2f → dir=%+.3f size=%.2f → target=%+.3f (cur=%+.3f)",
         rl_action, llm_signal, llm_confidence, llm_size,
-        sentiment_net, direction, blended_size, target_units,
+        sentiment_net, direction, blended_size, target_size, current_size_norm,
     )
 
-    # Nếu không thay đổi so với vị thế hiện tại thì hold
-    current_units = current_position.get("units", 0)
-    current_dir = 1 if current_units > 0 else (-1 if current_units < 0 else 0)
-    if target_units == current_dir:
-        return _decision(
-            current_units, "hold",
-            f"Already in target direction ({target_units:+d})",
-            tech_signal, rl_action, llm_confidence,
-        )
+    reason = (f"RL={rl_action:+.2f}, LLM={llm_signal}@{llm_confidence:.2f} size={llm_size:.2f}, "
+              f"sent={sentiment_net:+.2f}, dir={direction:+.3f}")
 
-    action = "buy" if target_units > 0 else ("sell" if target_units < 0 else "close")
-    reason = (f"RL={rl_action:.2f}, LLM={llm_signal}@{llm_confidence:.2f} size={llm_size:.2f}, "
-              f"sentiment={sentiment_net:.2f}, dir={direction:.3f} size={blended_size:.2f}")
-
-    return _decision(target_units, action, reason, tech_signal, rl_action, llm_confidence)
+    return _decision(target_size, current_size_norm, None, reason,
+                     tech_signal, rl_action, llm_confidence, config)
 
 
 def _get_rl_action(
@@ -160,12 +147,8 @@ def _get_rl_action(
     try:
         env = XAUUSDTradingEnv(df)
         obs, _ = env.reset()
-        # Move env cursor to the last bar so price/indicator features reflect the most recent state.
         env.step_idx = max(0, len(env.df) - 1)
         obs = env._get_obs()
-        # Inject LLM signals + portfolio state. Indices match XAUUSDTradingEnv._get_obs:
-        #   10 = tech signal_numeric, 11 = tech confidence, 12 = sentiment (0-1),
-        #   13 = current position in [-1, 1] (same scale as policy action / env.self.position).
         obs[10] = float(tech_signal.get("signal_numeric", 0.0))
         obs[11] = float(tech_signal.get("confidence", 0.5))
         obs[12] = float((sentiment.get("net_sentiment", 0.0) + 1.0) / 2.0)
@@ -180,19 +163,39 @@ def _get_rl_action(
 
 
 def _decision(
-    target_units: int,
-    action: str,
+    target_size: float,
+    current_size_norm: float,
+    forced_action: Optional[str],
     reason: str,
     tech_signal: dict,
     rl_action: float,
     confidence: float,
+    config: dict,
 ) -> dict:
+    """Build the final decision dict, picking action based on the delta to current position."""
+    if forced_action is not None:
+        action = forced_action
+    else:
+        # Configurable hysteresis: skip orders whose size change is below the threshold.
+        threshold = float(config.get("risk", {}).get("position_change_threshold", 0.15))
+        delta = target_size - current_size_norm
+        if abs(delta) < threshold:
+            action = "hold"
+        elif abs(target_size) < threshold:
+            # Going (close to) flat → explicit close
+            action = "close"
+        elif target_size > 0:
+            action = "buy"
+        else:
+            action = "sell"
+
     return {
-        "target_units": target_units,
-        "action": action,
-        "reason": reason,
-        "llm_signal": tech_signal.get("signal", "hold"),
+        "target_size":   target_size,
+        "current_size":  current_size_norm,
+        "action":        action,
+        "reason":        reason,
+        "llm_signal":    tech_signal.get("signal", "hold"),
         "llm_reasoning": tech_signal.get("reasoning", ""),
-        "rl_action": rl_action,
-        "confidence": confidence,
+        "rl_action":     rl_action,
+        "confidence":    confidence,
     }

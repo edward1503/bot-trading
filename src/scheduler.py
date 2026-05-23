@@ -91,32 +91,31 @@ def trading_loop():
                     tech["signal"], tech["confidence"], tech.get("size", 0),
                     sent["bullish_score"], risk["veto"], risk.get("reason", ""))
 
-        # Signal router → decision
+        # Signal router → continuous decision
+        from src.router import MAX_POSITION_OZ
         decision = decide(df_m5, tech, sent, risk, current_pos, account, CONFIG)
-        target_size = decision["target_units"]    # -1 to 1 float from router
-        current_size = current_pos.get("size", 0.0)
+        target_size = decision["target_size"]            # continuous [-1, 1]
+        current_size_oz = float(current_pos.get("size", 0.0))
+        target_oz = round(target_size * MAX_POSITION_OZ, 3)
 
-        logger.info("Decision: %s → target_size=%.3f (current=%.3f)",
-                    decision["action"], target_size, current_size)
+        logger.info("Decision: %s → target=%+.3f (%+.3f oz)  current=%+.3f oz  delta=%+.3f oz",
+                    decision["action"], target_size, target_oz,
+                    current_size_oz, target_oz - current_size_oz)
 
-        # Fetch mainnet price (real market price, dùng cho PnL thật)
+        # Fetch mainnet price (real market price for PnL display)
         price_info = fetch_current_price(INSTRUMENT)
         mainnet_price = price_info["last"]
 
-        # Execute — qty scaled by LLM size
         action = decision["action"]
         actual_oz = 0.0
         if action in ("buy", "sell"):
-            llm_size = tech.get("size", 0.5)
-            scaled_qty = round(max(QTY, QTY * 10 * llm_size), 3)  # min=QTY, max=QTY×10
-            actual_oz = round(scaled_qty * 10, 3)
-            broker.adjust_position(
-                INSTRUMENT, target_size, current_size, base_qty=scaled_qty
-            )
-            logger.info("Executing %s: %.3f oz (LLM size=%.2f, notional=$%.0f)",
-                        action, actual_oz, llm_size, actual_oz * mainnet_price)
+            broker.set_target_position(INSTRUMENT, target_oz)
+            actual_oz = abs(target_oz - current_size_oz)
+            logger.info("Executing %s: %.3f oz → new pos %+.3f oz (notional=$%.0f)",
+                        action, actual_oz, target_oz, abs(target_oz) * mainnet_price)
         elif action == "close":
             broker.close_position(INSTRUMENT)
+            actual_oz = abs(current_size_oz)
 
         # Re-read state after execution — PaperTrader persists to paper_portfolio table
         post_account = broker.get_account_summary()
@@ -130,8 +129,8 @@ def trading_loop():
         log_trade({
             "instrument":    INSTRUMENT,
             "action":        action,
-            "units":         int(round(target_size * 100)),
-            "volume_oz":     actual_oz if action in ("buy", "sell") else 0.0,
+            "units":         int(round(target_size * 100)),  # signed magnitude (×100 = bp)
+            "volume_oz":     round(actual_oz, 3),
             "price":         mainnet_price,
             "llm_signal":    tech["signal"],
             "llm_reasoning": tech.get("reasoning", ""),

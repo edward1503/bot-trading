@@ -106,19 +106,19 @@ class PaperTrader:
             "unrealized_pnl": unreal,
         }
 
-    def adjust_position(
-        self,
-        symbol: str,
-        target_size: float,    # -1.0 to 1.0 from router
-        current_size: float,
-        base_qty: float = 0.01,
-    ) -> dict | None:
-        target_oz = round(target_size * base_qty * 10, 3)
-        delta_oz  = round(target_oz - current_size, 3)
+    def set_target_position(self, symbol: str, target_oz: float) -> dict | None:
+        """Move from current oz to target_oz with a single market order."""
+        state = self._load()
+        delta_oz = round(target_oz - state["position_size"], 4)
         if abs(delta_oz) < 0.001:
             return None
         side = "Buy" if delta_oz > 0 else "Sell"
         return self._execute(side, abs(delta_oz))
+
+    # Backward-compat shim for the old caller signature.
+    def adjust_position(self, symbol, target_size, current_size, base_qty=0.01):
+        target_oz = round(target_size * base_qty * 10, 4)
+        return self.set_target_position(symbol, target_oz)
 
     def close_position(self, symbol: str = None) -> dict | None:
         state = self._load()
@@ -131,40 +131,55 @@ class PaperTrader:
     # ── Order simulation ──────────────────────────────────────────────────────
 
     def _execute(self, side: str, qty_oz: float) -> dict:
-        """Simulate market order fill with spread + commission."""
+        """Simulate market order fill with spread + commission.
+
+        Position bookkeeping (signed: long > 0, short < 0):
+          - Same-direction add  → weighted-average entry price
+          - Opposite direction  → realize PnL on closed slice, carry remainder at fill price
+        """
         state    = self._load()
         mid      = self._mid_price()
         fill_px  = mid + SPREAD_PIPS / 2 if side == "Buy" else mid - SPREAD_PIPS / 2
         notional = fill_px * qty_oz
         fee      = notional * COMMISSION_PCT
-        pos      = state["position_size"]
 
-        if side == "Buy":
-            new_pos   = pos + qty_oz
-            avg_entry = (
-                (state["avg_entry"] * abs(pos) + fill_px * qty_oz) / abs(new_pos)
-                if new_pos != 0 else 0.0
-            )
-            state["balance"] -= fee
-        else:  # Sell
-            new_pos = pos - qty_oz
-            # Realize PnL if reducing/flipping long
-            if pos > 0:
-                closed_qty = min(qty_oz, pos)
-                realized   = (fill_px - state["avg_entry"]) * closed_qty - fee
-                state["balance"]      += realized
-                state["realized_pnl"] += realized
+        pos       = state["position_size"]
+        avg_entry = state["avg_entry"]
+        signed_qty = qty_oz if side == "Buy" else -qty_oz
+        new_pos   = pos + signed_qty
+
+        realized = 0.0
+        same_direction = (pos == 0) or (pos > 0 and signed_qty > 0) or (pos < 0 and signed_qty < 0)
+
+        if same_direction:
+            # Average in
+            if new_pos != 0:
+                avg_entry = (avg_entry * abs(pos) + fill_px * qty_oz) / abs(new_pos)
             else:
-                state["balance"] -= fee
-            avg_entry = state["avg_entry"] if new_pos != 0 else 0.0
+                avg_entry = 0.0
+        else:
+            # Reducing or flipping
+            closed_qty = min(qty_oz, abs(pos))
+            # PnL on long close = (fill - entry) × qty;  short close = (entry - fill) × qty
+            pnl_sign = 1.0 if pos > 0 else -1.0
+            realized = pnl_sign * (fill_px - avg_entry) * closed_qty
+            if abs(signed_qty) > abs(pos):
+                # Flipped — remainder opens new position at fill_px
+                avg_entry = fill_px
+            elif new_pos == 0:
+                avg_entry = 0.0
+            # else: same avg_entry, just reduced size
 
+        state["balance"]      += realized - fee
+        state["realized_pnl"] += realized - fee
         state["position_size"] = round(new_pos, 4)
         state["avg_entry"]     = round(avg_entry, 4)
         self._save(state)
 
-        logger.info("PAPER %s %.4f oz @ %.2f | fee=%.4f | pos=%.4f",
-                    side, qty_oz, fill_px, fee, new_pos)
-        return {"side": side, "qty": qty_oz, "fill_price": fill_px, "fee": fee}
+        logger.info("PAPER %s %.4f oz @ %.2f | fee=%.4f | realized=%+.4f | pos=%.4f @ avg=%.2f",
+                    side, qty_oz, fill_px, fee, realized, new_pos, avg_entry)
+        return {"side": side, "qty": qty_oz, "fill_price": fill_px,
+                "fee": fee, "realized": realized}
 
     def _mid_price(self) -> float:
         from src.data.bybit_fetcher import fetch_current_price
