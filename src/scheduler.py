@@ -33,7 +33,7 @@ with open("config/config.yaml") as f:
     CONFIG = yaml.safe_load(f)
 
 INSTRUMENT = CONFIG["trading"]["instrument"]
-UNITS = CONFIG["trading"]["units"]
+QTY = CONFIG["trading"]["qty"]
 
 
 # ── Core Trading Loop ─────────────────────────────────────────────────────────
@@ -41,36 +41,37 @@ UNITS = CONFIG["trading"]["units"]
 def trading_loop():
     """Main 5-minute trading loop."""
     try:
-        from src.data.oanda_fetcher import fetch_candles, fetch_current_price
+        from src.data.bybit_fetcher import fetch_candles, fetch_current_price
         from src.data.news_fetcher import fetch_headlines
         from src.agents import technical, sentiment, risk as risk_agent
-        from src.execution.oanda_broker import OandaBroker
+        from src.execution.paper_trader import PaperTrader
         from src.router import decide
         from src.db import log_trade, log_portfolio_snapshot
 
-        broker = OandaBroker()
+        broker = PaperTrader(symbol=INSTRUMENT)
         account = broker.get_account_summary()
         current_pos = broker.get_open_position(INSTRUMENT)
 
-        # Check hard circuit breaker before doing anything
+        # Hard circuit breaker
         balance = account.get("balance", 100000)
-        daily_pnl_pct = account.get("unrealized_pnl", 0) / balance
+        daily_pnl_pct = account.get("unrealized_pnl", 0) / max(balance, 1)
         max_dd = CONFIG["risk"]["max_daily_drawdown"]
         if abs(daily_pnl_pct) >= max_dd:
             logger.warning("CIRCUIT BREAKER: daily PnL %+.2f%% exceeds -%d%% limit. Skipping loop.",
                            daily_pnl_pct * 100, max_dd * 100)
             return
 
-        # Fetch data
-        df_m5 = fetch_candles(INSTRUMENT, "M5", 200)
+        # Fetch M5 candles (interval "5" = 5min on Bybit)
+        tf_main = CONFIG["trading"]["timeframes"][0]   # "5"
+        df_m5 = fetch_candles(INSTRUMENT, tf_main, 200)
         if df_m5.empty:
-            logger.warning("Empty M5 data, skipping loop")
+            logger.warning("Empty candle data, skipping loop")
             return
 
         headlines = fetch_headlines(CONFIG["news"]["max_headlines"])
 
         # LLM agents (3 Groq calls)
-        tech = technical.analyze(df_m5, "M5")
+        tech = technical.analyze(df_m5, f"M{tf_main}")
         sent = sentiment.analyze(headlines)
         risk = risk_agent.check(
             account, current_pos,
@@ -79,36 +80,64 @@ def trading_loop():
             max_daily_drawdown=max_dd,
         )
 
-        logger.info("LLM: %s@%.2f | Sentiment: bull=%.2f | Risk: veto=%s",
-                    tech["signal"], tech["confidence"],
-                    sent["bullish_score"], risk["veto"])
+        logger.info("LLM: %s@%.2f size=%.2f | Sentiment: bull=%.2f | Risk: veto=%s (%s)",
+                    tech["signal"], tech["confidence"], tech.get("size", 0),
+                    sent["bullish_score"], risk["veto"], risk.get("reason", ""))
 
         # Signal router → decision
         decision = decide(df_m5, tech, sent, risk, current_pos, account, CONFIG)
-        target_units = decision["target_units"]
-        current_units = current_pos.get("units", 0)
+        target_size = decision["target_units"]    # -1 to 1 float from router
+        current_size = current_pos.get("size", 0.0)
 
-        logger.info("Decision: %s → target=%d units (current=%d)",
-                    decision["action"], target_units, current_units)
+        logger.info("Decision: %s → target_size=%.3f (current=%.3f)",
+                    decision["action"], target_size, current_size)
 
-        # Execute if position change needed
-        trade_result = None
-        if decision["action"] != "hold" and target_units != current_units:
-            trade_result = broker.adjust_position(INSTRUMENT, target_units, current_units)
-
-        # Log to DB
+        # Fetch mainnet price (real market price, dùng cho PnL thật)
         price_info = fetch_current_price(INSTRUMENT)
+        mainnet_price = price_info["last"]
+
+        # Execute — qty scaled by LLM size
+        action = decision["action"]
+        actual_oz = 0.0
+        if action in ("buy", "sell"):
+            llm_size = tech.get("size", 0.5)
+            scaled_qty = round(max(QTY, QTY * 10 * llm_size), 3)  # min=QTY, max=QTY×10
+            actual_oz = round(scaled_qty * 10, 3)
+            broker.adjust_position(
+                INSTRUMENT, target_size, current_size, base_qty=scaled_qty
+            )
+            logger.info("Executing %s: %.3f oz (LLM size=%.2f, notional=$%.0f)",
+                        action, actual_oz, llm_size, actual_oz * mainnet_price)
+        elif action == "close":
+            broker.close_position(INSTRUMENT)
+
+        # Re-read state after execution — PaperTrader persists to paper_portfolio table
+        post_account = broker.get_account_summary()
+        real_pnl = post_account["unrealized_pnl"]
+        real_nav = post_account["nav"]
+
+        logger.info("PnL: $%+.2f | NAV: $%.2f (balance=$%.2f, realized=$%+.2f)",
+                    real_pnl, real_nav, post_account["balance"], post_account.get("realized_pnl", 0.0))
+
+        # Log mọi loop vào trade log
         log_trade({
-            "instrument": INSTRUMENT,
-            "action": decision["action"],
-            "units": target_units,
-            "price": price_info["mid"],
-            "llm_signal": tech["signal"],
+            "instrument":    INSTRUMENT,
+            "action":        action,
+            "units":         int(round(target_size * 100)),
+            "volume_oz":     actual_oz if action in ("buy", "sell") else 0.0,
+            "price":         mainnet_price,
+            "llm_signal":    tech["signal"],
             "llm_reasoning": tech.get("reasoning", ""),
             "llm_confidence": tech["confidence"],
-            "rl_action": decision.get("rl_action", 0.0),
-            "portfolio_value": account["nav"],
+            "rl_action":     decision.get("rl_action", 0.0),
+            "portfolio_value": real_nav,
         })
+
+        # Portfolio snapshot với PnL thật mỗi loop
+        log_portfolio_snapshot(
+            {"balance": post_account["balance"], "nav": real_nav, "unrealized_pnl": real_pnl},
+            daily_pnl=real_pnl,
+        )
 
     except Exception as exc:
         logger.exception("Error in trading loop: %s", exc)
@@ -119,10 +148,10 @@ def trading_loop():
 def daily_report():
     """Log portfolio snapshot at midnight."""
     try:
-        from src.execution.oanda_broker import OandaBroker
+        from src.execution.paper_trader import PaperTrader
         from src.db import log_portfolio_snapshot
 
-        broker = OandaBroker()
+        broker = PaperTrader(symbol=INSTRUMENT)
         account = broker.get_account_summary()
         daily_pnl = account.get("unrealized_pnl", 0.0)
 
@@ -131,6 +160,18 @@ def daily_report():
                     account["balance"], account["nav"], daily_pnl)
     except Exception as exc:
         logger.exception("Error in daily report: %s", exc)
+
+
+# ── Daily Fine-tune ───────────────────────────────────────────────────────────
+
+def daily_finetune():
+    """Fine-tune PPO on yesterday's data at 01:00 UTC."""
+    try:
+        from src.rl.daily_trainer import run_daily_finetune
+        result = run_daily_finetune()
+        logger.info("Daily fine-tune result: %s", result)
+    except Exception as exc:
+        logger.exception("Error in daily fine-tune: %s", exc)
 
 
 # ── Weekly Evolution ──────────────────────────────────────────────────────────
@@ -189,11 +230,12 @@ def main():
     scheduler = BlockingScheduler(timezone="UTC")
     scheduler.add_listener(on_job_error, EVENT_JOB_ERROR)
 
-    scheduler.add_job(trading_loop, "interval", minutes=interval, id="trading_loop",
+    scheduler.add_job(trading_loop,    "interval", minutes=interval, id="trading_loop",
                       max_instances=1, coalesce=True)
-    scheduler.add_job(daily_report, "cron", hour=0, minute=0, id="daily_report")
-    scheduler.add_job(weekly_evolution, "cron", day_of_week="mon", hour=2, minute=0,
-                      id="weekly_evolution")
+    scheduler.add_job(daily_report,    "cron", hour=0,  minute=0,  id="daily_report")
+    scheduler.add_job(daily_finetune,  "cron", hour=1,  minute=0,  id="daily_finetune")
+    scheduler.add_job(weekly_evolution,"cron", hour=2,  minute=0,
+                      day_of_week="mon", id="weekly_evolution")
 
     # Run trading loop immediately on startup
     trading_loop()

@@ -37,8 +37,8 @@ def load_data():
 
 def fetch_live_chart_data():
     try:
-        from src.data.oanda_fetcher import fetch_candles
-        return fetch_candles("XAU_USD", "M5", 100)
+        from src.data.bybit_fetcher import fetch_candles
+        return fetch_candles("XAUUSDT", "5", 100)
     except Exception as exc:
         st.warning(f"Live data unavailable: {exc}")
         return pd.DataFrame()
@@ -46,7 +46,7 @@ def fetch_live_chart_data():
 
 # ── Header ────────────────────────────────────────────────────────────────────
 st.title("📈 XAUUSD 24/7 Paper Trading Bot")
-st.caption("Groq Llama 3.3 70B + PPO + Evolutionary RL (CMA-ES) | OANDA Practice")
+st.caption("Groq Llama 3.3 70B + PPO + Evolutionary RL (CMA-ES) | Bybit Testnet")
 
 tab1, tab2, tab3, tab4 = st.tabs(["PnL & Metrics", "Trade Log", "RL Fitness", "Live Chart"])
 

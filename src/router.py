@@ -84,35 +84,57 @@ def decide(
     # RL policy: build observation with LLM signals injected
     rl_action = _get_rl_action(df_m5, tech_signal, sentiment, current_position, account_summary)
 
-    # Blend: RL position target + LLM directional bias
-    llm_numeric = tech_signal.get("signal_numeric", 0.0)   # -1, 0, 1
-    sentiment_net = sentiment.get("net_sentiment", 0.0)    # -1 to 1
+    # LLM-determined size (0.0–1.0) và direction (-1, 0, 1)
+    llm_numeric  = tech_signal.get("signal_numeric", 0.0)  # -1 / 0 / 1
+    llm_size     = tech_signal.get("size", llm_confidence) # LLM tự quyết khối lượng
+    sentiment_net = sentiment.get("net_sentiment", 0.0)
 
-    # Weighted blend: 60% RL, 25% tech LLM, 15% sentiment
-    blended = 0.60 * rl_action + 0.25 * llm_numeric * llm_confidence + 0.15 * sentiment_net * 0.5
-    blended = float(np.clip(blended, -1.0, 1.0))
+    # Blend direction: 60% RL + 25% LLM + 15% sentiment
+    direction = 0.60 * rl_action + 0.25 * llm_numeric + 0.15 * sentiment_net * 0.5
+    direction = float(np.clip(direction, -1.0, 1.0))
+
+    # Blend size: 50% LLM size + 50% |RL action| (RL cũng biết nên đặt bao nhiêu)
+    blended_size = 0.50 * llm_size + 0.50 * abs(rl_action)
+    blended_size = float(np.clip(blended_size, 0.0, 1.0))
 
     # Apply risk manager's size reduction
     size_pct = risk.get("adjusted_size_pct", 1.0)
-    blended *= size_pct
+    if not risk.get("veto", False) and size_pct < 0.3:
+        size_pct = 0.3
+    blended_size *= size_pct
 
-    # Convert to integer units
-    base_units = config.get("trading", {}).get("units", 10)
-    target_units = int(round(blended * base_units))
+    # Final target: direction × size → [-1, 1] float
+    MIN_SIGNAL = 0.02
+    if direction > MIN_SIGNAL:
+        target_size_float = blended_size          # long
+    elif direction < -MIN_SIGNAL:
+        target_size_float = -blended_size         # short
+    else:
+        target_size_float = 0.0                   # flat
 
-    # Threshold: don't trade if change is tiny
+    # Convert to integer units (1 unit = 1 lệnh minimum)
+    target_units = 1 if target_size_float > MIN_SIGNAL else (-1 if target_size_float < -MIN_SIGNAL else 0)
+
+    logger.info(
+        "Router: rl=%.3f llm=%s(conf=%.2f size=%.2f) sentiment=%.2f "
+        "→ dir=%.3f size=%.2f → target=%+d",
+        rl_action, llm_signal, llm_confidence, llm_size,
+        sentiment_net, direction, blended_size, target_units,
+    )
+
+    # Nếu không thay đổi so với vị thế hiện tại thì hold
     current_units = current_position.get("units", 0)
-    threshold = config.get("risk", {}).get("position_change_threshold", 0.15)
-    if abs(target_units - current_units) < (base_units * threshold):
+    current_dir = 1 if current_units > 0 else (-1 if current_units < 0 else 0)
+    if target_units == current_dir:
         return _decision(
             current_units, "hold",
-            f"Position change below threshold ({target_units} vs {current_units})",
+            f"Already in target direction ({target_units:+d})",
             tech_signal, rl_action, llm_confidence,
         )
 
     action = "buy" if target_units > 0 else ("sell" if target_units < 0 else "close")
-    reason = (f"RL={rl_action:.2f}, LLM={llm_signal}@{llm_confidence:.2f}, "
-              f"sentiment={sentiment_net:.2f}, blended={blended:.2f}")
+    reason = (f"RL={rl_action:.2f}, LLM={llm_signal}@{llm_confidence:.2f} size={llm_size:.2f}, "
+              f"sentiment={sentiment_net:.2f}, dir={direction:.3f} size={blended_size:.2f}")
 
     return _decision(target_units, action, reason, tech_signal, rl_action, llm_confidence)
 

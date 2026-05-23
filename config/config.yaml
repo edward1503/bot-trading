@@ -1,7 +1,7 @@
 trading:
-  instrument: "XAU_USD"
-  timeframes: ["M5", "M15", "H1"]
-  units: 10                         # 10 units XAU (paper trade)
+  instrument: "XAUUSDT"             # Bybit perpetual: Gold vs USDT
+  timeframes: ["5", "15", "60"]     # Bybit interval codes: 5min, 15min, 1h
+  qty: 0.01                         # 0.01 oz gold per trade (~$25 notional on testnet)
   loop_interval_minutes: 5
   min_bars: 200                     # minimum candles required
 
@@ -32,10 +32,9 @@ backtest:
   transaction_cost: 0.0002          # 2 pips spread equivalent
   initial_cash: 100000
 
-oanda:
-  practice_url: "https://api-fxpractice.oanda.com"
-  stream_url: "https://stream-fxpractice.oanda.com"
-  environment: "practice"
+bybit:
+  testnet: true                     # set false for live (DO NOT until ready)
+  category: "linear"                # USDT perpetual contracts
 
 news:
   max_headlines: 10

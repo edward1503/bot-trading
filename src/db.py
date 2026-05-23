@@ -28,6 +28,7 @@ class Trade(Base):
     llm_reasoning = Column(Text)
     llm_confidence = Column(Float)
     rl_action = Column(Float)
+    volume_oz = Column(Float, nullable=True)   # actual oz traded
     pnl = Column(Float, nullable=True)
     portfolio_value = Column(Float, nullable=True)
 
@@ -40,6 +41,17 @@ class PortfolioSnapshot(Base):
     nav = Column(Float)
     unrealized_pnl = Column(Float)
     daily_pnl = Column(Float, nullable=True)
+
+
+class PositionTracker(Base):
+    """Tracks current open position with mainnet entry price for real PnL."""
+    __tablename__ = "position_tracker"
+    id         = Column(Integer, primary_key=True)
+    symbol     = Column(String(20), unique=True)
+    side       = Column(String(10))   # "long", "short", "flat"
+    size       = Column(Float, default=0.0)
+    entry_price = Column(Float, nullable=True)   # mainnet price at entry
+    updated_at = Column(DateTime, default=datetime.utcnow)
 
 
 class FitnessLog(Base):
@@ -62,6 +74,73 @@ def get_engine():
         _engine = create_engine(f"sqlite:///{DB_PATH}", echo=False)
         Base.metadata.create_all(_engine)
     return _engine
+
+
+def update_position(symbol: str, action: str, size: float, mainnet_price: float):
+    """Called after every buy/sell execution to track position with real entry price."""
+    from sqlalchemy import text
+    with Session(get_engine()) as session:
+        row = session.execute(
+            text("SELECT * FROM position_tracker WHERE symbol=:s"), {"s": symbol}
+        ).fetchone()
+
+        if action == "buy":
+            side = "long"
+        elif action == "sell":
+            side = "short"
+        else:
+            return  # hold/close handled separately
+
+        if row is None:
+            session.execute(
+                text("INSERT INTO position_tracker (symbol, side, size, entry_price, updated_at) VALUES (:sym,:side,:sz,:ep,:ts)"),
+                {"sym": symbol, "side": side, "sz": size, "ep": mainnet_price, "ts": datetime.utcnow()},
+            )
+        else:
+            # Average-in if same direction, reset if flipping
+            existing_side = row[2] if hasattr(row, '__getitem__') else getattr(row, 'side', 'flat')
+            existing_size = float(row[3] if hasattr(row, '__getitem__') else getattr(row, 'size', 0))
+            existing_entry = float(row[4] if hasattr(row, '__getitem__') else getattr(row, 'entry_price', mainnet_price) or mainnet_price)
+
+            if side == existing_side and existing_size > 0:
+                # Average entry price
+                total = existing_size + size
+                avg_entry = (existing_entry * existing_size + mainnet_price * size) / total
+                session.execute(
+                    text("UPDATE position_tracker SET side=:side, size=:sz, entry_price=:ep, updated_at=:ts WHERE symbol=:sym"),
+                    {"side": side, "sz": total, "ep": avg_entry, "ts": datetime.utcnow(), "sym": symbol},
+                )
+            else:
+                # New direction — reset
+                session.execute(
+                    text("UPDATE position_tracker SET side=:side, size=:sz, entry_price=:ep, updated_at=:ts WHERE symbol=:sym"),
+                    {"side": side, "sz": size, "ep": mainnet_price, "ts": datetime.utcnow(), "sym": symbol},
+                )
+        session.commit()
+
+
+def close_position_tracker(symbol: str):
+    from sqlalchemy import text
+    with Session(get_engine()) as session:
+        session.execute(
+            text("UPDATE position_tracker SET side='flat', size=0, entry_price=NULL, updated_at=:ts WHERE symbol=:sym"),
+            {"ts": datetime.utcnow(), "sym": symbol},
+        )
+        session.commit()
+
+
+def calc_unrealized_pnl(symbol: str, current_mainnet_price: float, contract_size: float = 0.01) -> float:
+    """PnL = size × (current_price - entry_price) × contract_size. Shorts are negated."""
+    from sqlalchemy import text
+    with Session(get_engine()) as session:
+        row = session.execute(
+            text("SELECT side, size, entry_price FROM position_tracker WHERE symbol=:s"), {"s": symbol}
+        ).fetchone()
+    if row is None or row[0] == "flat" or row[2] is None or row[1] == 0:
+        return 0.0
+    side, size, entry = row[0], float(row[1]), float(row[2])
+    pnl = size * (current_mainnet_price - entry) * contract_size
+    return round(pnl if side == "long" else -pnl, 4)
 
 
 def log_trade(trade_data: dict):

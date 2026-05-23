@@ -1,5 +1,5 @@
 # Broker & Data
-oandapyV20==0.7.2
+pybit>=5.7.0
 yfinance>=0.2.40
 
 # LLM
@@ -21,7 +21,8 @@ ta>=0.11.0
 backtesting>=0.3.3
 
 # Dashboard
-streamlit>=1.35.0
+fastapi>=0.111.0
+uvicorn>=0.30.0
 plotly>=5.22.0
 
 # Scheduler & Utils

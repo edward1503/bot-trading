@@ -26,12 +26,15 @@ RISK_TEMPLATE = """Portfolio State:
 - Portfolio drawdown from peak: {portfolio_dd_pct:.2f}%
 
 Proposed action: {proposed_signal} with confidence {confidence:.0%}
+Note: "buy" = open/add long position. "sell" = open/add SHORT position (not close).
+"hold" = keep current position unchanged.
 
 Assess risk and decide whether to allow this trade.
 Return JSON with exactly:
 {{"veto": true|false, "reason": "<max 20 words>", "adjusted_size_pct": 0.0-1.0}}
 
-adjusted_size_pct: 1.0 = full size, 0.5 = half size, 0.0 = no trade"""
+adjusted_size_pct: 1.0 = full size, 0.5 = half size, 0.0 = no trade
+Only veto if there is a genuine risk concern (e.g. drawdown exceeded, extreme volatility)."""
 
 
 def get_client() -> Groq:

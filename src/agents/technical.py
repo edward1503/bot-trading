@@ -27,12 +27,15 @@ ANALYSIS_TEMPLATE = """Current XAU/USD Market Data:
 - EMA50: {ema50:.2f}, EMA200: {ema200:.2f}
 - ATR(14): {atr:.2f}
 - Recent % change: {close_pct:.4f}
-- Trend: price is {"ABOVE" if close > ema200 else "BELOW"} EMA200
+- Trend: price is {trend} EMA200
 
 Timeframe: {timeframe}
 
 Return JSON with exactly these fields:
-{{"signal": "buy" | "sell" | "hold", "confidence": 0.0-1.0, "reasoning": "<max 25 words>"}}"""
+{{"signal": "buy" | "sell" | "hold", "confidence": 0.0-1.0, "size": 0.0-1.0, "reasoning": "<max 25 words>"}}
+
+size guide: 0.25=small, 0.5=medium, 0.75=large, 1.0=full. Scale with conviction strength.
+Use size=0.0 when signal=hold."""
 
 
 def get_client() -> Groq:
@@ -51,12 +54,13 @@ def analyze(df: pd.DataFrame, timeframe: str = "M5", max_retries: int = 3) -> di
         return _fallback("empty dataframe")
 
     row = df.iloc[-1]
+    trend = "ABOVE" if row["close"] > row["ema200"] else "BELOW"
     prompt = ANALYSIS_TEMPLATE.format(
         close=row["close"], open=row["open"], high=row["high"], low=row["low"],
         rsi=row["rsi"], macd=row["macd"], macd_signal=row["macd_signal"],
         macd_diff=row["macd_diff"], bb_pct=row["bb_pct"],
         ema50=row["ema50"], ema200=row["ema200"], atr=row["atr"],
-        close_pct=row["close_pct"], timeframe=timeframe,
+        close_pct=row["close_pct"], timeframe=timeframe, trend=trend,
     )
 
     for attempt in range(max_retries):
@@ -93,10 +97,15 @@ def _validate_signal(result: dict) -> dict:
         signal = "hold"
     confidence = float(result.get("confidence", 0.5))
     confidence = max(0.0, min(1.0, confidence))
+    size = float(result.get("size", confidence))   # fallback: dùng confidence làm size
+    size = max(0.0, min(1.0, size))
+    if signal == "hold":
+        size = 0.0
     return {
-        "signal": signal,
-        "confidence": confidence,
-        "reasoning": str(result.get("reasoning", ""))[:100],
+        "signal":         signal,
+        "confidence":     confidence,
+        "size":           size,
+        "reasoning":      str(result.get("reasoning", ""))[:100],
         "signal_numeric": 1.0 if signal == "buy" else (-1.0 if signal == "sell" else 0.0),
     }
 

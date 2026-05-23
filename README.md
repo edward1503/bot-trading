@@ -1,7 +1,7 @@
 # XAUUSD 24/7 Paper Trading Bot
 
 **Groq Llama 3.3 70B** + **PPO Reinforcement Learning** + **Evolutionary RL (CMA-ES)**  
-Paper trading XAU/USD via OANDA Practice API — runs 24/7 on Oracle Cloud Always Free.
+Paper trading XAUUSDT (Gold perpetual) via **Bybit Testnet** — runs 24/7 on Oracle Cloud Always Free.
 
 ---
 
@@ -15,8 +15,8 @@ LLM Agents (Groq)          Evolutionary RL (EvoTorch)
         │                              │
         └──────────── Signal Router ───┘
                             │
-                     OANDA Practice API
-                       (XAU_USD orders)
+                     Bybit Testnet API
+                       (XAUUSDT orders)
                             │
                      SQLite + Streamlit Dashboard
 ```
@@ -26,8 +26,8 @@ LLM Agents (Groq)          Evolutionary RL (EvoTorch)
 ## Quick Start
 
 ### 1. Get free API keys
-- **OANDA Practice**: https://www.oanda.com/demo-account/ (free demo account)
-- **Groq**: https://console.groq.com/ (free tier: 30 RPM, 1000 RPD)
+- **Bybit Testnet**: https://testnet.bybit.com → Register → API Management → Create New Key
+- **Groq**: https://console.groq.com → API Keys (free tier: 30 RPM, 1000 RPD)
 
 ### 2. Configure
 ```bash
@@ -93,7 +93,7 @@ Key settings to customize:
 
 | Component | Technology | Cost |
 |-----------|-----------|------|
-| Paper Broker | OANDA v20 Practice API | Free |
+| Paper Broker | Bybit Testnet (XAUUSDT perp) | Free |
 | LLM | Groq Llama 3.3 70B | Free tier (30 RPM) |
 | RL | Stable-Baselines3 PPO | Open source |
 | Evolutionary | EvoTorch CMA-ES | Open source |

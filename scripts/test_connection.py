@@ -1,27 +1,20 @@
 """
-Quick smoke test for Phase 1.
-Run: python scripts/test_connection.py
+Smoke test — run: python scripts/test_connection.py
 
 Checks:
-  1. OANDA practice account reachable, can fetch XAU_USD candles
-  2. OANDA account balance readable
-  3. Groq API reachable, Llama 3.3 70B responds
-  4. News fetcher returns headlines
+  1. Bybit Testnet: fetch XAUUSDT candles + current price
+  2. Bybit Testnet: account balance + open positions
+  3. Groq: Llama 3.3 70B responds with valid JSON signal
+  4. News fetcher: returns gold headlines
 """
 
-import sys
-import os
-import json
-import logging
-
-# Allow running from project root
+import sys, os, json, logging
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
-logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")
 
 
-def check(label: str, fn):
+def check(label, fn):
     try:
         result = fn()
         print(f"  ✓ {label}")
@@ -35,33 +28,37 @@ def main():
     from dotenv import load_dotenv
     load_dotenv("config/.env")
 
-    print("\n=== Phase 1 Connection Test ===\n")
+    print("\n=== Connection Smoke Test ===\n")
 
-    # ── 1. OANDA candles ──────────────────────────────────────────────────────
-    print("[ OANDA Data ]")
-    from src.data.oanda_fetcher import fetch_candles, fetch_current_price
-    df = check("Fetch 50 M5 XAU_USD candles", lambda: fetch_candles("XAU_USD", "M5", 50))
+    # ── 1. Bybit candles ──────────────────────────────────────────────────────
+    print("[ Bybit Testnet — Market Data ]")
+    from src.data.bybit_fetcher import fetch_candles, fetch_current_price
+
+    df = check("Fetch 50 M5 XAUUSDT candles", lambda: fetch_candles("XAUUSDT", "5", 50))
     if df is not None and not df.empty:
-        print(f"     → {len(df)} bars, last close: {df['close'].iloc[-1]:.2f}")
-        print(f"     → columns: {list(df.columns)}")
+        print(f"     → {len(df)} bars  |  last close: {df['close'].iloc[-1]:.2f}")
+        print(f"     → indicators: {[c for c in df.columns if c not in ('open','high','low','close','volume')]}")
 
-    price = check("Fetch current bid/ask price", lambda: fetch_current_price("XAU_USD"))
+    price = check("Fetch current bid/ask price", lambda: fetch_current_price("XAUUSDT"))
     if price:
-        print(f"     → bid={price['bid']}, ask={price['ask']}, spread={price['spread']:.4f}")
+        print(f"     → last={price['last']}, bid={price['bid']}, ask={price['ask']}, spread={price['spread']:.2f}")
 
-    # ── 2. OANDA account ─────────────────────────────────────────────────────
-    print("\n[ OANDA Account ]")
-    from src.execution.oanda_broker import OandaBroker
-    broker = OandaBroker()
-    summary = check("Get account summary", broker.get_account_summary)
+    # ── 2. Bybit Testnet — Unified Trading Account ────────────────────────────
+    print("\n[ Bybit Testnet — Unified Trading Account ]")
+    from src.execution.bybit_broker import BybitBroker
+    broker = BybitBroker(testnet=True)
+
+    summary = check("Get wallet balance (USDT)", broker.get_account_summary)
     if summary:
-        print(f"     → balance: ${summary['balance']:,.2f}, NAV: ${summary['nav']:,.2f}")
-    pos = check("Get XAU_USD position", lambda: broker.get_open_position("XAU_USD"))
-    if pos:
-        print(f"     → units: {pos['units']} (0 = flat)")
+        print(f"     → balance: ${summary['balance']:,.2f}  NAV: ${summary['nav']:,.2f}  "
+              f"unrealized PnL: ${summary['unrealized_pnl']:+.2f}")
 
-    # ── 3. Groq LLM ──────────────────────────────────────────────────────────
-    print("\n[ Groq Llama 3.3 70B ]")
+    pos = check("Get XAUUSDT position", lambda: broker.get_open_position("XAUUSDT"))
+    if pos:
+        print(f"     → net size: {pos['size']} oz  (0 = flat)")
+
+    # ── 3. Groq ───────────────────────────────────────────────────────────────
+    print("\n[ Groq — Llama 3.3 70B ]")
     from groq import Groq
     groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
@@ -70,27 +67,32 @@ def main():
             model="llama-3.3-70b-versatile",
             messages=[{
                 "role": "user",
-                "content": 'XAU/USD RSI=62, MACD positive, price above EMA200. Return JSON: {"signal":"buy|sell|hold","confidence":0.0}'
+                "content": 'XAU/USD RSI=58, MACD positive, price above EMA200. Return JSON: {"signal":"buy|sell|hold","confidence":0.0,"reasoning":""}'
             }],
             response_format={"type": "json_object"},
-            max_tokens=60,
+            max_tokens=200,
             temperature=0.1,
         )
         return json.loads(resp.choices[0].message.content)
 
-    groq_result = check("Groq JSON signal response", test_groq)
-    if groq_result:
-        print(f"     → {groq_result}")
+    result = check("JSON signal from Llama 3.3 70B", test_groq)
+    if result:
+        print(f"     → {result}")
 
-    # ── 4. News headlines ─────────────────────────────────────────────────────
+    # ── 4. News ───────────────────────────────────────────────────────────────
     print("\n[ News Fetcher ]")
     from src.data.news_fetcher import fetch_headlines
-    headlines = check("Fetch gold headlines (GNews RSS fallback)", fetch_headlines)
+    headlines = check("Fetch gold headlines (Google News RSS)", fetch_headlines)
     if headlines:
         print(f"     → {len(headlines)} headlines")
-        print(f"     → Sample: {headlines[0][:80]}...")
+        if headlines:
+            print(f"     → Sample: {headlines[0][:80]}")
 
     print("\n=== Done ===\n")
+    print("Next step: fill in config/.env then run:")
+    print("  python scripts/test_connection.py")
+    print("  python src/rl/train.py --train-start 2022-01-01 --train-end 2023-12-31")
+    print("  python src/scheduler.py")
 
 
 if __name__ == "__main__":
