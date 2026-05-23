@@ -2,14 +2,16 @@
 
 import os
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import create_engine, Column, Integer, Float, String, DateTime, Text
 from sqlalchemy.orm import DeclarativeBase, Session
 
+from src.config import PROJECT_ROOT
+
 logger = logging.getLogger(__name__)
 
-DB_PATH = os.getenv("DB_PATH", "logs/trades.db")
+DB_PATH = os.getenv("DB_PATH", str(PROJECT_ROOT / "logs" / "trades.db"))
 
 
 class Base(DeclarativeBase):
@@ -172,6 +174,28 @@ def log_fitness(cycle: dict):
         )
         session.add(fl)
         session.commit()
+
+
+def get_daily_drawdown(current_nav: float) -> dict:
+    """
+    Compute today's drawdown from the day's NAV peak (UTC day).
+
+    Returns dict with peak_nav, open_nav, drawdown_pct (0.0–1.0). When the day's
+    history is empty, treats current_nav as both peak and open ⇒ drawdown = 0.
+    """
+    from sqlalchemy import text
+    day_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    with Session(get_engine()) as session:
+        rows = session.execute(
+            text("SELECT nav FROM portfolio_snapshots WHERE timestamp >= :d ORDER BY id"),
+            {"d": day_start.replace(tzinfo=None)},
+        ).fetchall()
+    navs = [float(r[0]) for r in rows if r[0] is not None]
+    navs.append(float(current_nav))
+    peak = max(navs)
+    open_nav = navs[0]
+    drawdown_pct = (peak - current_nav) / peak if peak > 0 else 0.0
+    return {"peak_nav": peak, "open_nav": open_nav, "drawdown_pct": drawdown_pct}
 
 
 def get_trades_df():

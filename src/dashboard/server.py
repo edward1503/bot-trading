@@ -2,14 +2,15 @@
 
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
+
+from src.config import PROJECT_ROOT
 
 app = FastAPI(title="XAUUSD Bot Dashboard")
 
@@ -135,9 +136,40 @@ def get_position():
         return {"error": str(exc)}
 
 
+@app.get("/api/health")
+def get_health():
+    """Liveness probe: returns last loop timestamp + staleness flag (stale if >15 min)."""
+    from sqlalchemy import text
+    from src.db import get_engine
+
+    try:
+        with get_engine().connect() as conn:
+            last_trade_ts = conn.execute(text("SELECT MAX(timestamp) FROM trades")).scalar()
+            last_snap_ts = conn.execute(text("SELECT MAX(timestamp) FROM portfolio_snapshots")).scalar()
+    except Exception as exc:
+        return {"status": "error", "reason": str(exc)}
+
+    now = datetime.now(timezone.utc)
+    last_loop_ts = max(filter(None, [last_trade_ts, last_snap_ts]), default=None)
+    if last_loop_ts is None:
+        return {"status": "unknown", "reason": "no data yet", "now": now.isoformat()}
+
+    last_loop_dt = last_loop_ts if isinstance(last_loop_ts, datetime) else datetime.fromisoformat(str(last_loop_ts))
+    if last_loop_dt.tzinfo is None:
+        last_loop_dt = last_loop_dt.replace(tzinfo=timezone.utc)
+    age_sec = (now - last_loop_dt).total_seconds()
+    stale = age_sec > 15 * 60
+    return {
+        "status": "stale" if stale else "ok",
+        "last_loop": last_loop_dt.isoformat(),
+        "age_seconds": int(age_sec),
+        "now": now.isoformat(),
+    }
+
+
 # Serve static files (HTML/JS/CSS)
-static_dir = os.path.join(os.path.dirname(__file__), "static")
-app.mount("/", StaticFiles(directory=static_dir, html=True), name="static")
+static_dir = PROJECT_ROOT / "src" / "dashboard" / "static"
+app.mount("/", StaticFiles(directory=str(static_dir), html=True), name="static")
 
 
 if __name__ == "__main__":

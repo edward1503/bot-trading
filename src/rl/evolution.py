@@ -107,14 +107,18 @@ def run_evolution(
     fitness_scores: list[float],
     stdev: float = 0.02,
     elite_frac: float = 0.2,
+    eval_df=None,
+    base_model_path: str = "models/baseline_ppo",
 ) -> list[np.ndarray]:
     """
-    Simple CMA-ES-inspired evolution step.
-    Selects top elite_frac, generates new population around their mean.
-    Falls back to simple GA if evotorch is not installed.
+    CMA-ES evolution step that actually evaluates each candidate on the env.
+    Falls back to simple GA if EvoTorch isn't installed or eval_df missing.
     """
+    if eval_df is None:
+        logger.warning("No eval_df provided to run_evolution → using simple GA")
+        return _simple_ga_evolution(population, fitness_scores, stdev, elite_frac)
     try:
-        return _evotorch_evolution(population, fitness_scores, stdev)
+        return _evotorch_evolution(population, fitness_scores, stdev, eval_df, base_model_path)
     except ImportError:
         logger.warning("EvoTorch not available, using simple GA")
         return _simple_ga_evolution(population, fitness_scores, stdev, elite_frac)
@@ -124,47 +128,42 @@ def _evotorch_evolution(
     population: list[np.ndarray],
     fitness_scores: list[float],
     stdev: float,
+    eval_df,
+    base_model_path: str,
 ) -> list[np.ndarray]:
-    """EvoTorch CMA-ES evolution."""
-    import evotorch
-    from evotorch import Problem, SolutionBatch
+    """EvoTorch CMA-ES — each candidate's fitness is the Sharpe ratio on eval_df."""
+    from evotorch import Problem
     from evotorch.algorithms import CMAES
 
     pop_size = len(population)
     param_dim = len(population[0])
-
-    # Seed CMA-ES from best individual
     best_idx = int(np.argmax(fitness_scores))
-    best_params = population[best_idx]
+    seed_params = population[best_idx]
 
-    class InMemoryProblem(Problem):
-        def __init__(self, seed_params, cached_fitness):
+    class LivePolicyProblem(Problem):
+        def __init__(self):
             super().__init__(
                 objective_sense="max",
                 solution_length=param_dim,
                 dtype=torch.float32,
                 initial_bounds=(-2.0, 2.0),
             )
-            self._seed = torch.tensor(seed_params, dtype=torch.float32)
-            self._cached_fitness = cached_fitness
 
         def _evaluate(self, solution):
-            # Return cached fitness for the seed (we already evaluated)
-            solution.set_evals(torch.tensor(self._cached_fitness))
+            params = solution.values.detach().cpu().numpy()
+            fitness = evaluate_policy_on_data(params, eval_df, base_model_path)
+            solution.set_evals(float(fitness))
 
-    # Just run one CMA-ES generation to get new candidates
     searcher = CMAES(
-        InMemoryProblem(best_params, fitness_scores[best_idx]),
+        LivePolicyProblem(),
         stdev_init=stdev,
         popsize=pop_size,
+        center_init=torch.tensor(seed_params, dtype=torch.float32),
     )
     searcher.run(1)
 
-    new_population = []
-    for sol in searcher.population:
-        new_population.append(sol.values.numpy().copy())
-
-    logger.info("EvoTorch: generated %d new candidates (best fitness: %.3f)",
+    new_population = [sol.values.detach().cpu().numpy().copy() for sol in searcher.population]
+    logger.info("EvoTorch CMA-ES: %d candidates evaluated (seed fitness: %.3f)",
                 len(new_population), fitness_scores[best_idx])
     return new_population
 
@@ -242,8 +241,11 @@ class EvolutionManager:
         best_model.save(BEST_MODEL_PATH)
         logger.info("Deployed best policy to %s", BEST_MODEL_PATH)
 
-        # Evolve
-        self.population = run_evolution(self.population, fitness_scores)
+        # Evolve — pass eval_df so CMA-ES re-evaluates each candidate properly
+        self.population = run_evolution(
+            self.population, fitness_scores,
+            eval_df=eval_df, base_model_path=self.base_model_path,
+        )
 
         # Log fitness
         cycle_log = {

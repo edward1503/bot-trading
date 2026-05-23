@@ -7,12 +7,17 @@ import logging
 from typing import Optional
 
 from groq import Groq
-from dotenv import load_dotenv
 
-load_dotenv("config/.env")
+from src.config import load_env
+
+load_env()
 logger = logging.getLogger(__name__)
 
 _client: Optional[Groq] = None
+
+# Sentiment of news changes slowly — cache for 1h to cut Groq calls 12x.
+_CACHE: dict = {"timestamp": 0.0, "headlines_key": "", "result": None}
+_CACHE_TTL_SECONDS = 60 * 60
 
 SYSTEM_PROMPT = """You are a financial sentiment analyst specializing in gold (XAU/USD) markets.
 Analyze the provided news headlines and assess overall market sentiment.
@@ -39,9 +44,17 @@ def analyze(headlines: list[str], max_retries: int = 3) -> dict:
     """
     Analyze news headlines for gold sentiment.
     Returns: {"bullish_score": float, "bearish_score": float, "summary": str, "key_theme": str}
+    Result cached 1h keyed on the headline list.
     """
     if not headlines:
         return _fallback("no headlines")
+
+    headlines_key = "|".join(headlines[:10])
+    now = time.time()
+    if (_CACHE["result"] is not None
+            and now - _CACHE["timestamp"] < _CACHE_TTL_SECONDS
+            and _CACHE["headlines_key"] == headlines_key):
+        return _CACHE["result"]
 
     numbered = "\n".join(f"{i+1}. {h}" for i, h in enumerate(headlines[:10]))
     prompt = SENTIMENT_TEMPLATE.format(headlines=numbered)
@@ -58,8 +71,9 @@ def analyze(headlines: list[str], max_retries: int = 3) -> dict:
                 max_tokens=120,
                 temperature=0.1,
             )
-            result = json.loads(resp.choices[0].message.content)
-            return _validate(result)
+            result = _validate(json.loads(resp.choices[0].message.content))
+            _CACHE.update(timestamp=now, headlines_key=headlines_key, result=result)
+            return result
         except json.JSONDecodeError as exc:
             logger.warning("Sentiment agent JSON parse failed (attempt %d): %s", attempt + 1, exc)
             if attempt < max_retries - 1:

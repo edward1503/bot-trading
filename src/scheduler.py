@@ -8,29 +8,30 @@
 import logging
 import os
 import sys
-import time
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import yaml
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.events import EVENT_JOB_ERROR
-from dotenv import load_dotenv
 
-load_dotenv("config/.env")
+from src.config import PROJECT_ROOT, load_config, load_env
+
+load_env()
+
+LOG_DIR = PROJECT_ROOT / "logs"
+LOG_DIR.mkdir(exist_ok=True)
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler("logs/bot.log"),
+        logging.FileHandler(LOG_DIR / "bot.log"),
     ],
 )
 logger = logging.getLogger("scheduler")
 
-with open("config/config.yaml") as f:
-    CONFIG = yaml.safe_load(f)
+CONFIG = load_config()
 
 INSTRUMENT = CONFIG["trading"]["instrument"]
 QTY = CONFIG["trading"]["qty"]
@@ -42,23 +43,24 @@ def trading_loop():
     """Main 5-minute trading loop."""
     try:
         from src.data.bybit_fetcher import fetch_candles, fetch_current_price
-        from src.data.news_fetcher import fetch_headlines
+        from src.data.news_fetcher import get_cached_headlines
         from src.agents import technical, sentiment, risk as risk_agent
         from src.execution.paper_trader import PaperTrader
         from src.router import decide
-        from src.db import log_trade, log_portfolio_snapshot
+        from src.db import log_trade, log_portfolio_snapshot, get_daily_drawdown
 
         broker = PaperTrader(symbol=INSTRUMENT)
         account = broker.get_account_summary()
         current_pos = broker.get_open_position(INSTRUMENT)
 
-        # Hard circuit breaker
-        balance = account.get("balance", 100000)
-        daily_pnl_pct = account.get("unrealized_pnl", 0) / max(balance, 1)
+        # Daily DD circuit breaker: triggers on NAV drop from today's peak.
         max_dd = CONFIG["risk"]["max_daily_drawdown"]
-        if abs(daily_pnl_pct) >= max_dd:
-            logger.warning("CIRCUIT BREAKER: daily PnL %+.2f%% exceeds -%d%% limit. Skipping loop.",
-                           daily_pnl_pct * 100, max_dd * 100)
+        dd_info = get_daily_drawdown(account["nav"])
+        if dd_info["drawdown_pct"] >= max_dd:
+            logger.warning(
+                "CIRCUIT BREAKER: daily DD %.2f%% ≥ %.0f%% (peak=$%.2f, nav=$%.2f). Skipping loop.",
+                dd_info["drawdown_pct"] * 100, max_dd * 100, dd_info["peak_nav"], account["nav"],
+            )
             return
 
         # Fetch M5 candles (interval "5" = 5min on Bybit)
@@ -68,17 +70,22 @@ def trading_loop():
             logger.warning("Empty candle data, skipping loop")
             return
 
-        headlines = fetch_headlines(CONFIG["news"]["max_headlines"])
+        headlines = get_cached_headlines(CONFIG["news"]["max_headlines"])
 
-        # LLM agents (3 Groq calls)
+        # LLM agents. Tech every loop; sentiment is internally cached 1h.
+        # Risk agent only called when tech proposes an actual trade — saves ~70% of calls.
         tech = technical.analyze(df_m5, f"M{tf_main}")
         sent = sentiment.analyze(headlines)
-        risk = risk_agent.check(
-            account, current_pos,
-            proposed_signal=tech.get("signal", "hold"),
-            confidence=tech.get("confidence", 0.0),
-            max_daily_drawdown=max_dd,
-        )
+        proposed_signal = tech.get("signal", "hold")
+        if proposed_signal == "hold":
+            risk = {"veto": False, "reason": "skipped (hold)", "adjusted_size_pct": 0.0}
+        else:
+            risk = risk_agent.check(
+                account, current_pos,
+                proposed_signal=proposed_signal,
+                confidence=tech.get("confidence", 0.0),
+                max_daily_drawdown=max_dd,
+            )
 
         logger.info("LLM: %s@%.2f size=%.2f | Sentiment: bull=%.2f | Risk: veto=%s (%s)",
                     tech["signal"], tech["confidence"], tech.get("size", 0),
@@ -181,20 +188,19 @@ def weekly_evolution():
     try:
         logger.info("Starting weekly evolutionary RL cycle...")
         from src.rl.evolution import EvolutionManager
-        from src.rl.train import load_historical_data
+        from src.data.bybit_fetcher import fetch_historical_candles
         from src.db import log_fitness
-        from datetime import date, timedelta
 
-        end = date.today().strftime("%Y-%m-%d")
-        start = (date.today() - timedelta(days=14)).strftime("%Y-%m-%d")  # 2 weeks for stability
-
-        eval_df = load_historical_data("GC=F", start, end)
-        if eval_df.empty:
-            logger.warning("No historical data for evolution eval, skipping")
+        # Evolve on the same instrument+timeframe the bot actually trades:
+        # 14 days of Bybit XAUUSDT M5 (~4000 bars).
+        eval_df = fetch_historical_candles(INSTRUMENT, "5", days=14)
+        if eval_df.empty or len(eval_df) < 200:
+            logger.warning("Insufficient Bybit history for evolution (%d bars), skipping",
+                           len(eval_df))
             return
 
         manager = EvolutionManager(
-            base_model_path="models/baseline_ppo",
+            base_model_path=str(PROJECT_ROOT / "models" / "baseline_ppo"),
             pop_size=CONFIG["rl"]["population_size"],
         )
         manager.load_state()
@@ -224,8 +230,8 @@ def main():
     interval = CONFIG["trading"]["loop_interval_minutes"]
     logger.info("Starting XAUUSD bot | instrument=%s | loop=%dmin", INSTRUMENT, interval)
 
-    os.makedirs("logs", exist_ok=True)
-    os.makedirs("models", exist_ok=True)
+    (PROJECT_ROOT / "logs").mkdir(exist_ok=True)
+    (PROJECT_ROOT / "models").mkdir(exist_ok=True)
 
     scheduler = BlockingScheduler(timezone="UTC")
     scheduler.add_listener(on_job_error, EVENT_JOB_ERROR)

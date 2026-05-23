@@ -14,7 +14,7 @@ from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.callbacks import EvalCallback, CheckpointCallback
 
 from src.rl.env import XAUUSDTradingEnv
-from src.data.oanda_fetcher import _add_indicators
+from src.data.indicators import add_indicators
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -36,7 +36,7 @@ def load_historical_data(symbol: str, start: str, end: str) -> pd.DataFrame:
         df.to_csv(cache_path)
         logger.info("Saved to %s (%d rows)", cache_path, len(df))
 
-    return _add_indicators(df)
+    return add_indicators(df)
 
 
 def train(

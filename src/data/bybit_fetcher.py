@@ -9,11 +9,12 @@ import logging
 from typing import Optional
 
 import pandas as pd
-import ta
 from pybit.unified_trading import HTTP
-from dotenv import load_dotenv
 
-load_dotenv("config/.env")
+from src.config import load_env
+from src.data.indicators import add_indicators
+
+load_env()
 logger = logging.getLogger(__name__)
 
 # Mainnet session for public market data (real prices, no auth required)
@@ -73,41 +74,7 @@ def fetch_candles(
         logger.warning("fetch_candles returned empty DataFrame for %s %s", symbol, interval)
         return df
 
-    return _add_indicators(df)
-
-
-def _add_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    close = df["close"]
-    high  = df["high"]
-    low   = df["low"]
-
-    df["rsi"]         = ta.momentum.RSIIndicator(close, window=14).rsi()
-
-    macd              = ta.trend.MACD(close, window_fast=12, window_slow=26, window_sign=9)
-    df["macd"]        = macd.macd()
-    df["macd_signal"] = macd.macd_signal()
-    df["macd_diff"]   = macd.macd_diff()
-
-    bb                = ta.volatility.BollingerBands(close, window=20, window_dev=2)
-    df["bb_upper"]    = bb.bollinger_hband()
-    df["bb_lower"]    = bb.bollinger_lband()
-    df["bb_mid"]      = bb.bollinger_mavg()
-    df["bb_pct"]      = bb.bollinger_pband()   # 0=lower band, 1=upper band
-
-    # min_periods=1 so indicators return values even when fewer bars than window
-    df["ema50"]       = close.ewm(span=50,  min_periods=1, adjust=False).mean()
-    df["ema200"]      = close.ewm(span=200, min_periods=1, adjust=False).mean()
-    df["atr"]         = ta.volatility.AverageTrueRange(high, low, close, window=14).average_true_range()
-
-    df["close_pct"]   = close.pct_change().fillna(0.0)
-    df["hl_ratio"]    = (high - low) / close
-
-    # bb_pct is NaN when std=0 (constant price) — fill with 0.5 (neutral)
-    df["bb_pct"]      = df["bb_pct"].fillna(0.5)
-
-    # Forward-fill then back-fill remaining NaNs from short-window warmup
-    df = df.ffill().bfill()
-    return df.dropna()
+    return add_indicators(df)
 
 
 def fetch_current_price(symbol: str = "XAUUSDT") -> dict:
@@ -128,6 +95,58 @@ def fetch_current_price(symbol: str = "XAUUSDT") -> dict:
         "spread":  round(ask - bid, 2),
         "mark":    float(ticker.get("markPrice", last)),
     }
+
+
+def fetch_historical_candles(
+    symbol: str = "XAUUSDT",
+    interval: str = "5",
+    days: int = 14,
+) -> pd.DataFrame:
+    """Fetch up to N days of OHLCV via pagination (Bybit limits each call to 1000 bars)."""
+    import time as _time
+
+    now_ms = int(_time.time() * 1000)
+    start_ms = now_ms - days * 24 * 60 * 60 * 1000
+    interval_minutes = {"1": 1, "3": 3, "5": 5, "15": 15, "30": 30, "60": 60,
+                        "120": 120, "240": 240, "D": 1440}.get(interval, 5)
+    bar_ms = interval_minutes * 60 * 1000
+
+    session = get_market_session()
+    all_rows: list = []
+    cursor_end = now_ms
+    while cursor_end > start_ms:
+        resp = session.get_kline(
+            category="linear", symbol=symbol, interval=interval,
+            end=cursor_end, limit=1000,
+        )
+        if resp["retCode"] != 0:
+            raise RuntimeError(f"Bybit kline error: {resp['retMsg']}")
+        bars = resp["result"]["list"]
+        if not bars:
+            break
+        all_rows.extend(bars)
+        oldest_ms = int(bars[-1][0])
+        if oldest_ms <= start_ms or oldest_ms == cursor_end:
+            break
+        cursor_end = oldest_ms - bar_ms
+
+    if not all_rows:
+        return pd.DataFrame()
+
+    # Deduplicate by timestamp, then sort ascending
+    seen = {}
+    for bar in all_rows:
+        seen[int(bar[0])] = bar
+    sorted_bars = [seen[k] for k in sorted(seen.keys())]
+
+    rows = [{
+        "time": pd.Timestamp(int(b[0]), unit="ms", tz="UTC"),
+        "open": float(b[1]), "high": float(b[2]), "low": float(b[3]),
+        "close": float(b[4]), "volume": float(b[5]),
+    } for b in sorted_bars]
+    df = pd.DataFrame(rows).set_index("time")
+    df = df[df.index >= pd.Timestamp(start_ms, unit="ms", tz="UTC")]
+    return add_indicators(df)
 
 
 def fetch_multi_timeframe(

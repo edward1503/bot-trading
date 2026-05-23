@@ -7,9 +7,10 @@ import logging
 from typing import Optional
 
 from groq import Groq
-from dotenv import load_dotenv
 
-load_dotenv("config/.env")
+from src.config import load_env
+
+load_env()
 logger = logging.getLogger(__name__)
 
 _client: Optional[Groq] = None

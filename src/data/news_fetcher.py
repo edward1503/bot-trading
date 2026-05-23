@@ -2,16 +2,34 @@
 
 import os
 import logging
+import time
 from datetime import datetime, timedelta, timezone
 
 import requests
-from dotenv import load_dotenv
 
-load_dotenv("config/.env")
+from src.config import load_env
+
+load_env()
 logger = logging.getLogger(__name__)
 
 _GOLD_KEYWORDS = "gold OR XAUUSD OR \"gold price\" OR \"safe haven\""
 _RSS_URL = "https://gnews.io/api/v4/search?q=gold+price&lang=en&max=10&apikey={key}"
+
+# In-process cache: headlines change slowly, refresh once per hour to save quota.
+_CACHE: dict = {"timestamp": 0.0, "headlines": []}
+_CACHE_TTL_SECONDS = 60 * 60
+
+
+def get_cached_headlines(max_articles: int = 10) -> list[str]:
+    """Return cached headlines (1h TTL) — fetch on first call or when stale."""
+    now = time.time()
+    if now - _CACHE["timestamp"] < _CACHE_TTL_SECONDS and _CACHE["headlines"]:
+        return _CACHE["headlines"][:max_articles]
+    headlines = fetch_headlines(max_articles)
+    if headlines:
+        _CACHE["headlines"] = headlines
+        _CACHE["timestamp"] = now
+    return headlines
 
 
 def fetch_headlines(max_articles: int = 10) -> list[str]:

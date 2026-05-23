@@ -11,10 +11,16 @@ import numpy as np
 import pandas as pd
 from stable_baselines3 import PPO
 
+from src.config import PROJECT_ROOT
+
 logger = logging.getLogger(__name__)
 
-_BEST_MODEL_PATH = "models/best_policy"
-_BASELINE_MODEL_PATH = "models/baseline_ppo"
+_BEST_MODEL_PATH = str(PROJECT_ROOT / "models" / "best_policy")
+_BASELINE_MODEL_PATH = str(PROJECT_ROOT / "models" / "baseline_ppo")
+
+# Maximum position in oz used to normalize obs[13] to the [-1, 1] policy action scale.
+# Derived from scheduler scaling: max scaled_qty = QTY * 10 = 0.1 oz, max position = 0.1 * 10 = 1.0 oz.
+MAX_POSITION_OZ = 1.0
 
 _policy: Optional[PPO] = None
 
@@ -154,11 +160,17 @@ def _get_rl_action(
     try:
         env = XAUUSDTradingEnv(df)
         obs, _ = env.reset()
-        # Inject LLM signals into observation indices 10, 11, 12
+        # Move env cursor to the last bar so price/indicator features reflect the most recent state.
+        env.step_idx = max(0, len(env.df) - 1)
+        obs = env._get_obs()
+        # Inject LLM signals + portfolio state. Indices match XAUUSDTradingEnv._get_obs:
+        #   10 = tech signal_numeric, 11 = tech confidence, 12 = sentiment (0-1),
+        #   13 = current position in [-1, 1] (same scale as policy action / env.self.position).
         obs[10] = float(tech_signal.get("signal_numeric", 0.0))
         obs[11] = float(tech_signal.get("confidence", 0.5))
-        obs[12] = float((sentiment.get("net_sentiment", 0.0) + 1.0) / 2.0)  # normalize to 0-1
-        obs[13] = float(current_position.get("units", 0)) / 10.0
+        obs[12] = float((sentiment.get("net_sentiment", 0.0) + 1.0) / 2.0)
+        units = float(current_position.get("units", 0.0))
+        obs[13] = float(np.clip(units / MAX_POSITION_OZ, -1.0, 1.0))
 
         action, _ = policy.predict(obs, deterministic=True)
         return float(action[0])

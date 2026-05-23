@@ -8,9 +8,10 @@ from typing import Optional
 
 import pandas as pd
 from groq import Groq
-from dotenv import load_dotenv
 
-load_dotenv("config/.env")
+from src.config import load_env
+
+load_env()
 logger = logging.getLogger(__name__)
 
 _client: Optional[Groq] = None
@@ -112,4 +113,5 @@ def _validate_signal(result: dict) -> dict:
 
 def _fallback(reason: str) -> dict:
     logger.warning("Technical agent fallback: %s", reason)
-    return {"signal": "hold", "confidence": 0.0, "reasoning": reason, "signal_numeric": 0.0}
+    return {"signal": "hold", "confidence": 0.0, "size": 0.0,
+            "reasoning": reason, "signal_numeric": 0.0}

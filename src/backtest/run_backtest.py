@@ -23,7 +23,7 @@ from stable_baselines3 import PPO
 
 from src.rl.train import load_historical_data
 from src.rl.env import XAUUSDTradingEnv
-from src.data.oanda_fetcher import _add_indicators
+from src.data.indicators import add_indicators  # noqa: F401  (legacy import kept for compat)
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)

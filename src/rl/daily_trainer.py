@@ -37,7 +37,7 @@ def _active_model_path() -> str:
 def _fetch_yesterday(symbol: str = "GC=F") -> pd.DataFrame:
     """Download yesterday's 1h OHLCV from yfinance."""
     import yfinance as yf
-    from src.data.oanda_fetcher import _add_indicators  # reuse indicator logic
+    from src.data.indicators import add_indicators
 
     yesterday = date.today() - timedelta(days=1)
     # yfinance: fetch a few days back to ensure we get data
@@ -47,7 +47,7 @@ def _fetch_yesterday(symbol: str = "GC=F") -> pd.DataFrame:
     df = yf.Ticker(symbol).history(start=start, end=end, interval="1h")
     df.columns = [c.lower() for c in df.columns]
     df = df[["open", "high", "low", "close", "volume"]].dropna()
-    return _add_indicators(df)
+    return add_indicators(df)
 
 
 def _append_to_buffer(new_df: pd.DataFrame) -> pd.DataFrame:

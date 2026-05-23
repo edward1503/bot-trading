@@ -9,14 +9,19 @@ services:
       - ./models:/app/models
       - ./logs:/app/logs
       - ./data:/app/data
-    command: python src/scheduler.py
+      - ./config:/app/config:ro
+    command: python -m src.scheduler
 
   dashboard:
     build: .
     restart: always
     env_file: config/.env
     ports:
-      - "8501:8501"
+      - "8080:8080"
     volumes:
-      - ./logs:/app/logs
-    command: streamlit run src/dashboard/app.py --server.port 8501 --server.address 0.0.0.0
+      - ./logs:/app/logs:ro
+      - ./models:/app/models:ro
+      - ./config:/app/config:ro
+    command: python -m src.dashboard.server
+    depends_on:
+      - trading-bot
