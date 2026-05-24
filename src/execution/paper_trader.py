@@ -186,9 +186,9 @@ class PaperTrader:
         try:
             return fetch_current_price(self.symbol)["last"]
         except Exception:
-            # Fallback: last close from candles
+            # Fallback: last close from candles (need ≥26 bars for indicators in fetch_candles)
             from src.data.bybit_fetcher import fetch_candles
-            df = fetch_candles(self.symbol, "1", 1)
+            df = fetch_candles(self.symbol, "1", 50)
             return float(df["close"].iloc[-1]) if not df.empty else 2600.0
 
 

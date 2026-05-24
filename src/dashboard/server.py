@@ -52,11 +52,18 @@ def get_fitness():
     return df.to_dict(orient="records")
 
 
+_ALLOWED_INTERVALS = {"1", "5", "15", "30", "60", "240", "D", "W", "M"}
+
+
 @app.get("/api/live")
-def get_live():
+def get_live(interval: str = "5", limit: int = 200):
     from src.data.bybit_fetcher import fetch_candles
+    iv = interval.upper() if interval.lower() in ("d", "w", "m") else interval
+    if iv not in _ALLOWED_INTERVALS:
+        return {"error": f"invalid interval '{interval}'; allowed: {sorted(_ALLOWED_INTERVALS)}"}
+    limit = max(50, min(int(limit), 1000))
     try:
-        df = fetch_candles("XAUUSDT", "5", 200)
+        df = fetch_candles("XAUUSDT", iv, limit)
         df = df.reset_index()
         df["time"] = df["time"].astype(str)
         cols = ["time", "open", "high", "low", "close", "volume",

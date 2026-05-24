@@ -129,21 +129,40 @@ from src.execution.paper_trader import PaperTrader; PaperTrader(); print('Reset 
     { $_ -in @("help", "-h", "--help", "?") } {
         Write-Host ""
         Write-Host "XAUUSD bot CLI" -ForegroundColor Cyan
+        Write-Host "Single entry point for daily operations of the XAUUSD trading bot."
         Write-Host ""
-        Write-Host 'Usage:  bot <command>'
+        Write-Host 'Usage:  bot <command>' -ForegroundColor Yellow
+        Write-Host '        (no command = ' -NoNewline; Write-Host 'status' -ForegroundColor Green -NoNewline; Write-Host ')'
         Write-Host ""
-        Write-Host 'Commands:'
-        Write-Host '  start     Start bot + dashboard in background'
-        Write-Host '  stop      Stop both'
-        Write-Host '  restart   Stop + start'
-        Write-Host '  status    Process + health + last log lines'
-        Write-Host '  logs      Tail bot.log live'
-        Write-Host '  dash      Open dashboard in browser'
-        Write-Host '  health    Print /api/health JSON'
-        Write-Host '  pos       Print current position'
-        Write-Host '  trades    Print last 10 trades'
-        Write-Host '  reset     Reset paper portfolio to fresh $100k'
-        Write-Host '  help      Show this help'
+
+        Write-Host 'Lifecycle:' -ForegroundColor Magenta
+        Write-Host '  start     ' -NoNewline -ForegroundColor Green; Write-Host 'Start bot + dashboard in background (auto-restart on crash)'
+        Write-Host '  stop      ' -NoNewline -ForegroundColor Green; Write-Host 'Stop bot + dashboard processes'
+        Write-Host '  restart   ' -NoNewline -ForegroundColor Green; Write-Host 'Stop then start (useful after config/code changes)'
+        Write-Host ""
+
+        Write-Host 'Monitoring:' -ForegroundColor Magenta
+        Write-Host '  status    ' -NoNewline -ForegroundColor Green; Write-Host 'Process state + /api/health + last log lines'
+        Write-Host '  logs      ' -NoNewline -ForegroundColor Green; Write-Host 'Tail logs/bot.log live (Ctrl+C to exit)'
+        Write-Host '  health    ' -NoNewline -ForegroundColor Green; Write-Host 'Print /api/health JSON (last loop time, age)'
+        Write-Host '  dash      ' -NoNewline -ForegroundColor Green; Write-Host 'Open dashboard at http://localhost:8080 in browser'
+        Write-Host ""
+
+        Write-Host 'Trading data:' -ForegroundColor Magenta
+        Write-Host '  pos       ' -NoNewline -ForegroundColor Green; Write-Host 'Print current position (side, size, entry, unrealized PnL, balance)'
+        Write-Host '  trades    ' -NoNewline -ForegroundColor Green; Write-Host 'Print last 10 trades from DB with LLM/RL signals'
+        Write-Host ""
+
+        Write-Host 'Maintenance:' -ForegroundColor Magenta
+        Write-Host '  reset     ' -NoNewline -ForegroundColor Green; Write-Host 'Wipe trades + portfolio history, reset to $100k (asks confirm)'
+        Write-Host '  help      ' -NoNewline -ForegroundColor Green; Write-Host 'Show this help (aliases: -h, --help, ?)'
+        Write-Host ""
+
+        Write-Host 'Examples:' -ForegroundColor Yellow
+        Write-Host '  bot start            # boot everything'
+        Write-Host '  bot                  # quick status check'
+        Write-Host '  bot logs             # watch live activity'
+        Write-Host '  bot pos              # check open position + PnL'
         Write-Host ""
     }
 

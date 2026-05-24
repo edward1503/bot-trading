@@ -1,2 +1,2 @@
-﻿bot=23332
-dashboard=12184
+﻿bot=15320
+dashboard=12492

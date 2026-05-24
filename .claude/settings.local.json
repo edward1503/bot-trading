@@ -2,7 +2,8 @@
   "permissions": {
     "allow": [
       "Bash(python -c \"import ast; ast.parse\\(open\\('src/scheduler.py'\\).read\\(\\)\\); print\\('OK'\\)\")",
-      "Bash(python -m src.scheduler)"
+      "Bash(python -m src.scheduler)",
+      "PowerShell(.\\\\scripts\\\\bot.ps1 help)"
     ]
   }
 }

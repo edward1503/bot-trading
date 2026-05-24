@@ -278,6 +278,37 @@
     .dd-bar { height: 4px; background: #f1f5f9; border-radius: 2px; margin-top: 8px; overflow: hidden; }
     .dd-fill { height: 100%; background: var(--red); border-radius: 2px; transition: width 0.4s; }
 
+    /* ── Timeframe toolbar ── */
+    .tf-toolbar {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 0 10px;
+    }
+    .tf-toolbar-label {
+      font-size: 11px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      font-weight: 600;
+      margin-right: 4px;
+    }
+    .tf-btn {
+      padding: 5px 12px;
+      font-size: 12px;
+      font-weight: 600;
+      border: 1px solid var(--border);
+      background: var(--surface);
+      border-radius: 6px;
+      cursor: pointer;
+      color: var(--muted);
+      user-select: none;
+      transition: all 0.15s;
+      font-variant-numeric: tabular-nums;
+    }
+    .tf-btn:hover { color: var(--text); border-color: var(--border-strong); }
+    .tf-btn.active { background: var(--gold); color: #fff; border-color: var(--gold); }
+
     /* ── Indicator toolbar ── */
     .indi-toolbar {
       display: flex;
@@ -525,8 +556,18 @@
 <div id="tab-live" class="tab-pane">
   <div class="chart-card">
     <div class="chart-header">
-      <div class="chart-title">XAU/USD M5 · Bybit Mainnet</div>
+      <div class="chart-title" id="live-chart-title">XAU/USD · Bybit Mainnet</div>
       <div id="ohlc-display" style="font-size:12px;color:var(--muted);font-family:monospace;"></div>
+    </div>
+
+    <!-- Timeframe toolbar -->
+    <div class="tf-toolbar">
+      <span class="tf-toolbar-label">Timeframe:</span>
+      <button class="tf-btn" data-tf="1"  onclick="setTimeframe(this)">1M</button>
+      <button class="tf-btn active" data-tf="5"  onclick="setTimeframe(this)">5M</button>
+      <button class="tf-btn" data-tf="15" onclick="setTimeframe(this)">15M</button>
+      <button class="tf-btn" data-tf="30" onclick="setTimeframe(this)">30M</button>
+      <button class="tf-btn" data-tf="D"  onclick="setTimeframe(this)">1D</button>
     </div>
 
     <!-- Indicator toolbar -->
@@ -622,6 +663,11 @@ let indiState = (() => {
 })();
 function saveIndiState() { localStorage.setItem('indiState', JSON.stringify(indiState)); }
 
+// Active timeframe — persisted in localStorage (Bybit values: 1, 5, 15, 30, D)
+const TF_LABEL = { '1': '1M', '5': 'M5', '15': 'M15', '30': 'M30', 'D': 'D1' };
+let activeTf = localStorage.getItem('activeTf') || '5';
+if (!TF_LABEL[activeTf]) activeTf = '5';
+
 // ── Tab switching ──────────────────────────────────────────────────────────────
 function showTab(name, btn) {
   document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
@@ -674,6 +720,26 @@ function syncChipStates() {
   document.querySelectorAll('.indi-chip').forEach(chip => {
     chip.classList.toggle('on', !!indiState[chip.dataset.indi]);
   });
+}
+
+// ── Timeframe ────────────────────────────────────────────────────────────────
+function setTimeframe(btn) {
+  const tf = btn.dataset.tf;
+  if (tf === activeTf) return;
+  activeTf = tf;
+  localStorage.setItem('activeTf', tf);
+  document.querySelectorAll('.tf-btn').forEach(b => b.classList.toggle('active', b.dataset.tf === tf));
+  updateChartTitle();
+  loadLiveChart();
+}
+
+function syncTfButtons() {
+  document.querySelectorAll('.tf-btn').forEach(b => b.classList.toggle('active', b.dataset.tf === activeTf));
+}
+
+function updateChartTitle() {
+  const el = document.getElementById('live-chart-title');
+  if (el) el.textContent = `XAU/USD ${TF_LABEL[activeTf] || ''} · Bybit Mainnet`;
 }
 
 function toggleSettings() {
@@ -1044,6 +1110,8 @@ function initTVChart() {
   });
 
   syncChipStates();
+  syncTfButtons();
+  updateChartTitle();
   applyIndiVisibility();
   loadLiveChart();
 }
@@ -1097,11 +1165,12 @@ function toUTCTimestamp(timeStr) {
 async function loadLiveChart() {
   if (!tvChart) return;
   const limit = parseInt(document.getElementById('candle-count')?.value || 200, 10);
-  let data = await fetch('/api/live').then(r => r.json()).catch(() => []);
-  if (!data.length || data.error) return;
-
-  // Trim to user-requested count (server returns up to 200)
-  if (data.length > limit) data = data.slice(-limit);
+  const url = `/api/live?interval=${encodeURIComponent(activeTf)}&limit=${limit}`;
+  let data = await fetch(url).then(r => r.json()).catch(() => []);
+  if (!data || data.error || !data.length) {
+    if (data && data.error) console.warn('live chart error:', data.error);
+    return;
+  }
 
   lastLiveData = data;
   populateIndicatorData(data);
